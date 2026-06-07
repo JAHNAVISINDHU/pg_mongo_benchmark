@@ -210,3 +210,11 @@ Window functions are where PostgreSQL's optimizer shines. The `SUM() OVER (PARTI
 |----------|---------|-------------|
 | `POSTGRES_USER` | postgres | PG superuser |
 | `POSTGRES_PASSWORD` | postgres | PG password |
+| `POSTGRES_DB` | activity_db | PG database name |
+| `MONGO_USER` | mongo | Mongo root user |
+| `MONGO_PASSWORD` | mongo | Mongo password |
+| `MONGO_DB` | activity_db | Mongo database name |
+| `NUM_USERS` | 100000 | Users to generate |
+| `NUM_SESSIONS` | 1000000 | Sessions to generate |
+| `NUM_EVENTS` | 5000000 | Events to generate |
+| `SEED` | 42 | RNG seed for reproducibility |
