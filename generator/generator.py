@@ -298,3 +298,41 @@ class DataGenerator:
                 batch = []
         if batch:
             db.sessions.insert_many(batch, ordered=False)
+
+        # ── Insert events (denormalized) ───────────────────────────────────────
+        log.info("  Mongo: inserting %d events in batches …", NUM_EVENTS)
+        session_ids = list(session_meta.keys())
+        total = 0
+        batch = []
+
+        for _ in range(NUM_EVENTS):
+            sid   = random.choice(session_ids)
+            meta  = session_meta[sid]
+            etype = random.choices(EVENT_TYPES, weights=EVENT_WEIGHTS)[0]
+            payload = _make_payload(etype)
+            ts    = _rand_ts()
+
+            doc = {
+                # time-series fields
+                "created_at":   ts,
+                "user_id":      meta["user_id"],
+                # denormalized context
+                "session_id":   sid,
+                "device_type":  meta["device_type"],
+                "cohort_month": meta["cohort_month"],
+                "event_type":   etype,
+                "payload":      payload,
+            }
+            batch.append(doc)
+            total += 1
+
+            if len(batch) >= BATCH_SIZE_MONGO:
+                db.events.insert_many(batch, ordered=False)
+                batch = []
+                if total % 500_000 == 0:
+                    log.info("    Mongo events: %d / %d", total, NUM_EVENTS)
+
+        if batch:
+            db.events.insert_many(batch, ordered=False)
+
+        log.info("  Mongo load complete.")
