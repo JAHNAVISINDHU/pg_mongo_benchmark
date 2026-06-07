@@ -418,3 +418,76 @@ ORDER BY (COALESCE(p.sessions_prev7,1) - l.sessions_last7) DESC;
         )
 
         mongo_ms, _ = _time_mongo(_churn, self.mdb, "Q4 churn risk")
+        mongo_plan  = {"note": "Two-pass pipeline; see benchmarker.py"}
+
+        return pg_ms, mongo_ms, pg_plan, mongo_plan
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Query 5 — Revenue Share per Purchase
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _q5(self):
+        sql = """
+SELECT
+    event_id,
+    user_id,
+    (payload->>'amount')::numeric                           AS purchase_amount,
+    SUM((payload->>'amount')::numeric) OVER (PARTITION BY user_id)
+                                                            AS lifetime_spend,
+    ROUND(
+        (payload->>'amount')::numeric /
+        NULLIF(SUM((payload->>'amount')::numeric) OVER (PARTITION BY user_id), 0)
+        * 100, 4
+    )                                                       AS pct_of_lifetime
+FROM events
+WHERE event_type = 'purchase'
+ORDER BY user_id, created_at;
+"""
+        (QUERY_DIR / "q5_revenue_share.sql").write_text(sql.strip())
+
+        pg_ms, _ = _time_pg(self.pg, sql, label="Q5 revenue share")
+        pg_plan  = _explain_pg(self.pg, sql)
+
+        pipeline = [
+            {"$match": {"event_type": "purchase"}},
+            {
+                "$setWindowFields": {
+                    "partitionBy": "$user_id",
+                    "sortBy": {"created_at": 1},
+                    "output": {
+                        "lifetime_spend": {
+                            "$sum": "$payload.amount",
+                            "window": {"documents": ["unbounded", "unbounded"]},
+                        }
+                    },
+                }
+            },
+            {
+                "$addFields": {
+                    "pct_of_lifetime": {
+                        "$cond": [
+                            {"$eq": ["$lifetime_spend", 0]},
+                            0,
+                            {
+                                "$multiply": [
+                                    {"$divide": ["$payload.amount", "$lifetime_spend"]},
+                                    100,
+                                ]
+                            },
+                        ]
+                    }
+                }
+            },
+            {"$sort": {"user_id": 1, "created_at": 1}},
+        ]
+        (QUERY_DIR / "q5_revenue_share.js").write_text(
+            "db.events.aggregate(" + json.dumps(pipeline, indent=2) + ")"
+        )
+
+        mongo_ms, _ = _time_mongo(
+            lambda db: db.events.aggregate(pipeline, allowDiskUse=True),
+            self.mdb, "Q5 revenue share",
+        )
+        mongo_plan = _explain_mongo(self.mdb.events, pipeline)
+
+        return pg_ms, mongo_ms, pg_plan, mongo_plan
