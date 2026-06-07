@@ -28,3 +28,20 @@ CREATE TABLE IF NOT EXISTS events (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_events_user_created
+    ON events(user_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_events_session_id
+    ON events(session_id);
+
+CREATE INDEX IF NOT EXISTS idx_events_payload_gin
+    ON events USING GIN (payload jsonb_path_ops);
+
+CREATE INDEX IF NOT EXISTS idx_events_created_at
+    ON events(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_users_cohort
+    ON users(cohort_month);
