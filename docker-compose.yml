@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: pg_activity
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-activity_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      postgres
+        -c shared_buffers=512MB
+        -c effective_cache_size=1GB
+        -c work_mem=64MB
+        -c maintenance_work_mem=256MB
+        -c max_connections=200
+        -c shared_preload_libraries=pg_stat_statements
+        -c pg_stat_statements.track=all
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-activity_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - bench_net
+
+  mongodb:
+    image: mongo:7.0
+    container_name: mongo_activity
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-mongo}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-mongo}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      test: >
+        mongosh --quiet --username ${MONGO_USER:-mongo} --password ${MONGO_PASSWORD:-mongo}
+        --authenticationDatabase admin
+        --eval "db.runCommand({ping:1}).ok" | grep -q 1
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 40s
+    networks:
+      - bench_net
+
+  mongo_init:
+    image: mongo:7.0
+    container_name: mongo_init
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_USER: ${MONGO_USER:-mongo}
+      MONGO_PASSWORD: ${MONGO_PASSWORD:-mongo}
+    entrypoint: >
+      mongosh --quiet --username ${MONGO_USER:-mongo} --password ${MONGO_PASSWORD:-mongo}
+      --host mongodb --authenticationDatabase admin
+      --eval "
+        try { rs.status(); print('RS already initialized'); }
+        catch(e) {
+          rs.initiate({_id:'rs0', members:[{_id:0, host:'mongodb:27017'}]});
+          print('RS initiated');
+        }
+      "
+    networks:
+      - bench_net
+
+  app:
+    build:
+      context: ./generator
+      dockerfile: Dockerfile
+    container_name: bench_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      mongo_init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-activity_db}
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_USER: ${MONGO_USER:-mongo}
+      MONGO_PASSWORD: ${MONGO_PASSWORD:-mongo}
+      MONGO_DB: ${MONGO_DB:-activity_db}
+      NUM_USERS: ${NUM_USERS:-100000}
+      NUM_SESSIONS: ${NUM_SESSIONS:-1000000}
+      NUM_EVENTS: ${NUM_EVENTS:-5000000}
+      SEED: ${SEED:-42}
+    volumes:
+      - ./benchmarks:/app/benchmarks
+      - ./queries:/app/queries
+    networks:
+      - bench_net
+
+volumes:
+  pg_data:
+  mongo_data:
+
+networks:
+  bench_net:
+    driver: bridge
