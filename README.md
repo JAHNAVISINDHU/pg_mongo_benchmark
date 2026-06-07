@@ -10,13 +10,13 @@ A fully containerized benchmarking suite comparing PostgreSQL 15 and MongoDB 7.0
 ┌─────────────────────────────────────────────────────────┐
 │                   docker-compose network                │
 │                                                         │
-│  ┌──────────────┐   COPY/INSERT    ┌────────────────┐  │
-│  │   Python App │ ───────────────► │  PostgreSQL 15  │  │
-│  │  (generator/ │                  │  (normalized)   │  │
-│  │  benchmarker │   insert_many    ├────────────────┤  │
-│  │  migration)  │ ───────────────► │   MongoDB 7.0   │  │
-│  └──────┬───────┘                  │  (denormalized) │  │
-│         │                          └────────────────┘  │
+│  ┌──────────────┐   COPY/INSERT    ┌────────────────┐   │
+│  │   Python App │ ───────────────► │  PostgreSQL 15 │   │
+│  │  (generator/ │                  │  (normalized)  │   │
+│  │  benchmarker │   insert_many    ├────────────────┤   │
+│  │  migration)  │ ───────────────► │   MongoDB 7.0  │   │
+│  └──────┬───────┘                  │  (denormalized)│   │
+│         │                          └────────────────┘   │
 │         ▼                                               │
 │  benchmarks/report.json                                 │
 │  benchmarks/results.csv                                 │
@@ -38,7 +38,7 @@ A fully containerized benchmarking suite comparing PostgreSQL 15 and MongoDB 7.0
 
 ```bash
 # 1. Clone and enter the project
-git clone <repo-url>
+git clone <https://github.com/JAHNAVISINDHU/pg_mongo_benchmark>
 cd pg_mongo_benchmark
 
 # 2. Copy environment file
