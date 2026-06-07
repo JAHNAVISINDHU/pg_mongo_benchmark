@@ -278,3 +278,143 @@ ORDER BY user_id;
                 }
             },
             {"$sort": {"_id": 1}},
+        ]
+        (QUERY_DIR / "q3_boundary_events.js").write_text(
+            "db.events.aggregate(" + json.dumps(pipeline, indent=2) + ")"
+        )
+
+        mongo_ms, _ = _time_mongo(
+            lambda db: db.events.aggregate(pipeline, allowDiskUse=True),
+            self.mdb, "Q3 boundary events",
+        )
+        mongo_plan = _explain_mongo(self.mdb.events, pipeline)
+
+        return pg_ms, mongo_ms, pg_plan, mongo_plan
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Query 4 — Churn Risk (session activity decline)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _q4(self):
+        sql = """
+WITH ref_date AS (SELECT MAX(start_time) AS max_dt FROM sessions),
+last7 AS (
+    SELECT s.user_id, COUNT(*) AS sessions_last7
+    FROM sessions s, ref_date r
+    WHERE s.start_time >= r.max_dt - INTERVAL '7 days'
+    GROUP BY s.user_id
+),
+prev7 AS (
+    SELECT s.user_id, COUNT(*) AS sessions_prev7
+    FROM sessions s, ref_date r
+    WHERE s.start_time >= r.max_dt - INTERVAL '14 days'
+      AND s.start_time <  r.max_dt - INTERVAL '7 days'
+    GROUP BY s.user_id
+)
+SELECT
+    l.user_id,
+    l.sessions_last7,
+    COALESCE(p.sessions_prev7, 0) AS sessions_prev7
+FROM last7 l
+LEFT JOIN prev7 p ON l.user_id = p.user_id
+WHERE l.sessions_last7 < COALESCE(p.sessions_prev7, 1)
+ORDER BY (COALESCE(p.sessions_prev7,1) - l.sessions_last7) DESC;
+"""
+        (QUERY_DIR / "q4_churn_risk.sql").write_text(sql.strip())
+
+        pg_ms, _ = _time_pg(self.pg, sql, label="Q4 churn risk")
+        pg_plan  = _explain_pg(self.pg, sql)
+
+        pipeline = [
+            {
+                "$facet": {
+                    "last7": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$gte": [
+                                        "$start_time",
+                                        {
+                                            "$subtract": [
+                                                {"$max": "$start_time"},
+                                                7 * 86400 * 1000,
+                                            ]
+                                        },
+                                    ]
+                                }
+                            }
+                        },
+                        {"$group": {"_id": "$user_id", "cnt": {"$sum": 1}}},
+                    ]
+                }
+            }
+        ]
+
+        # Use a more practical Mongo pipeline via $lookup on sessions
+        pipeline = [
+            {
+                "$lookup": {
+                    "from": "sessions",
+                    "pipeline": [
+                        {
+                            "$group": {
+                                "_id": "$user_id",
+                                "max_start": {"$max": "$start_time"},
+                            }
+                        },
+                        {"$group": {"_id": None, "global_max": {"$max": "$max_start"}}},
+                    ],
+                    "as": "ref",
+                }
+            }
+        ]
+
+        # Simplified: run on sessions collection directly
+        def _churn(db):
+            from datetime import timezone
+            import pymongo
+
+            ref_date_doc = list(db.sessions.aggregate([
+                {"$group": {"_id": None, "max_dt": {"$max": "$start_time"}}}
+            ]))
+            if not ref_date_doc:
+                return []
+            ref_dt = ref_date_doc[0]["max_dt"]
+            from datetime import timedelta
+            window_start = ref_dt - timedelta(days=7)
+            prev_start   = ref_dt - timedelta(days=14)
+
+            last7 = {
+                d["_id"]: d["cnt"]
+                for d in db.sessions.aggregate([
+                    {"$match": {"start_time": {"$gte": window_start}}},
+                    {"$group": {"_id": "$user_id", "cnt": {"$sum": 1}}},
+                ])
+            }
+            prev7 = {
+                d["_id"]: d["cnt"]
+                for d in db.sessions.aggregate([
+                    {"$match": {"start_time": {"$gte": prev_start, "$lt": window_start}}},
+                    {"$group": {"_id": "$user_id", "cnt": {"$sum": 1}}},
+                ])
+            }
+            at_risk = [
+                {"user_id": uid, "sessions_last7": l7, "sessions_prev7": prev7.get(uid, 0)}
+                for uid, l7 in last7.items()
+                if l7 < prev7.get(uid, 1)
+            ]
+            return at_risk
+
+        pipeline_js = [
+            {"$group": {"_id": None, "max_dt": {"$max": "$start_time"}}},
+            "# then use max_dt to compute last7 vs prev7 facets",
+        ]
+        (QUERY_DIR / "q4_churn_risk.js").write_text(
+            "// See benchmarker.py _q4() for full aggregation logic\n"
+            "// Churn risk pipeline runs in two passes on sessions collection\n"
+            "db.sessions.aggregate([\n"
+            '  { "$group": { "_id": "$user_id", "max_st": { "$max": "$start_time" } } }\n'
+            "])"
+        )
+
+        mongo_ms, _ = _time_mongo(_churn, self.mdb, "Q4 churn risk")
