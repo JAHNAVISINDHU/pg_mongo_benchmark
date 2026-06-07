@@ -198,3 +198,103 @@ class DataGenerator:
                 )
                 conn.commit()
 
+        log.info("  PG load complete.")
+
+    # ────────────────────────────── MongoDB load ─────────────────────────────
+
+    def _load_mongo(self, users, sessions):
+        db = self.mdb
+
+        # ── Collections ──────────────────────────────────────────────────────
+        # Drop and recreate for clean state
+        db.users.drop()
+        db.sessions.drop()
+
+        # Create events as time-series collection (best-effort; fallback to standard)
+        if "events" in db.list_collection_names():
+            db.events.drop()
+        if "revenue_stats" in db.list_collection_names():
+            db.revenue_stats.drop()
+
+        try:
+            db.create_collection(
+                "events",
+                timeseries={
+                    "timeField": "created_at",
+                    "metaField": "user_id",
+                    "granularity": "hours",
+                },
+            )
+            log.info("  Mongo: created time-series 'events' collection.")
+        except CollectionInvalid:
+            log.warning("  Mongo: 'events' already exists — using existing collection.")
+
+        try:
+            db.create_collection(
+                "revenue_stats",
+                timeseries={
+                    "timeField": "day",
+                    "metaField": "meta",
+                    "granularity": "hours",
+                },
+            )
+        except CollectionInvalid:
+            pass
+
+        # ── Indexes ───────────────────────────────────────────────────────────
+        db.users.create_indexes([
+            IndexModel([("user_id", ASCENDING)], unique=True),
+            IndexModel([("cohort_month", ASCENDING)]),
+        ])
+        db.sessions.create_indexes([
+            IndexModel([("session_id", ASCENDING)], unique=True),
+            IndexModel([("user_id", ASCENDING)]),
+        ])
+        # For time-series collections, compound index on metaField + timeField is automatic,
+        # but we add secondary indexes for query patterns.
+        db.events.create_indexes([
+            IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)]),
+            IndexModel([("event_type", ASCENDING)]),
+            IndexModel([("created_at", DESCENDING)]),
+        ])
+
+        # ── Insert users ──────────────────────────────────────────────────────
+        log.info("  Mongo: inserting users …")
+        user_map = {}  # user_id -> cohort_month
+        batch = []
+        for u in users:
+            user_map[u["user_id"]] = u["cohort_month"]
+            batch.append({
+                "user_id":      u["user_id"],
+                "email":        u["email"],
+                "cohort_month": u["cohort_month"],
+                "signup_date":  datetime.combine(u["signup_date"], datetime.min.time()).replace(tzinfo=timezone.utc),
+            })
+            if len(batch) >= BATCH_SIZE_MONGO:
+                db.users.insert_many(batch, ordered=False)
+                batch = []
+        if batch:
+            db.users.insert_many(batch, ordered=False)
+
+        # ── Insert sessions ───────────────────────────────────────────────────
+        log.info("  Mongo: inserting sessions …")
+        session_meta = {}  # session_id -> {user_id, device_type, cohort_month}
+        batch = []
+        for s in sessions:
+            session_meta[s["session_id"]] = {
+                "user_id":      s["user_id"],
+                "device_type":  s["device_type"],
+                "cohort_month": user_map[s["user_id"]],
+            }
+            batch.append({
+                "session_id":  s["session_id"],
+                "user_id":     s["user_id"],
+                "device_type": s["device_type"],
+                "start_time":  s["start_time"],
+                "cohort_month": user_map[s["user_id"]],
+            })
+            if len(batch) >= BATCH_SIZE_MONGO:
+                db.sessions.insert_many(batch, ordered=False)
+                batch = []
+        if batch:
+            db.sessions.insert_many(batch, ordered=False)
