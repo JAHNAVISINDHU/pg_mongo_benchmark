@@ -118,3 +118,163 @@ class Benchmarker:
 WITH daily_revenue AS (
     SELECT
         DATE(created_at)           AS day,
+        AVG((payload->>'amount')::numeric) AS avg_amount
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY DATE(created_at)
+)
+SELECT
+    day,
+    avg_amount,
+    AVG(avg_amount) OVER (
+        ORDER BY day
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS rolling_7d_avg
+FROM daily_revenue
+ORDER BY day;
+"""
+        QUERY_DIR.mkdir(exist_ok=True)
+        (QUERY_DIR / "q1_rolling_revenue.sql").write_text(sql.strip())
+
+        pg_ms, _ = _time_pg(self.pg, sql, label="Q1 rolling revenue")
+        pg_plan  = _explain_pg(self.pg, sql)
+
+        # ── Mongo ─────────────────────────────────────────────────────────────
+        pipeline = [
+            {"$match": {"event_type": "purchase"}},
+            {
+                "$group": {
+                    "_id": {
+                        "$dateToString": {"format": "%Y-%m-%d", "date": "$created_at"}
+                    },
+                    "avg_amount": {"$avg": "$payload.amount"},
+                }
+            },
+            {"$sort": {"_id": 1}},
+            {
+                "$setWindowFields": {
+                    "sortBy": {"_id": 1},
+                    "output": {
+                        "rolling_7d_avg": {
+                            "$avg": "$avg_amount",
+                            "window": {"documents": [-6, "current"]},
+                        }
+                    },
+                }
+            },
+        ]
+        (QUERY_DIR / "q1_rolling_revenue.js").write_text(
+            "db.events.aggregate(" + json.dumps(pipeline, indent=2) + ")"
+        )
+
+        mongo_ms, _ = _time_mongo(
+            lambda db: db.events.aggregate(pipeline), self.mdb, "Q1 rolling revenue"
+        )
+        mongo_plan  = _explain_mongo(self.mdb.events, pipeline)
+
+        return pg_ms, mongo_ms, pg_plan, mongo_plan
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Query 2 — Top 10 Users by Event Count per Cohort
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _q2(self):
+        sql = """
+WITH cohort_counts AS (
+    SELECT
+        u.cohort_month,
+        e.user_id,
+        COUNT(*) AS event_count
+    FROM events e
+    JOIN users u ON u.user_id = e.user_id
+    GROUP BY u.cohort_month, e.user_id
+),
+ranked AS (
+    SELECT
+        cohort_month,
+        user_id,
+        event_count,
+        RANK() OVER (PARTITION BY cohort_month ORDER BY event_count DESC) AS rank
+    FROM cohort_counts
+)
+SELECT cohort_month, user_id::text, event_count, rank
+FROM ranked
+WHERE rank <= 10
+ORDER BY cohort_month, rank;
+"""
+        (QUERY_DIR / "q2_cohort_top_performers.sql").write_text(sql.strip())
+
+        pg_ms, _ = _time_pg(self.pg, sql, label="Q2 cohort top 10")
+        pg_plan  = _explain_pg(self.pg, sql)
+
+        # Mongo — events already have cohort_month denormalized
+        pipeline = [
+            {
+                "$group": {
+                    "_id": {"cohort_month": "$cohort_month", "user_id": "$user_id"},
+                    "event_count": {"$sum": 1},
+                }
+            },
+            {
+                "$setWindowFields": {
+                    "partitionBy": "$_id.cohort_month",
+                    "sortBy": {"event_count": -1},
+                    "output": {
+                        "rank": {
+                            "$rank": {}
+                        }
+                    },
+                }
+            },
+            {"$match": {"rank": {"$lte": 10}}},
+            {
+                "$project": {
+                    "_id": 0,
+                    "cohort_month": "$_id.cohort_month",
+                    "user_id": "$_id.user_id",
+                    "event_count": 1,
+                    "rank": 1,
+                }
+            },
+            {"$sort": {"cohort_month": 1, "rank": 1}},
+        ]
+        (QUERY_DIR / "q2_cohort_top_performers.js").write_text(
+            "db.events.aggregate(" + json.dumps(pipeline, indent=2) + ")"
+        )
+
+        mongo_ms, _ = _time_mongo(
+            lambda db: db.events.aggregate(pipeline, allowDiskUse=True),
+            self.mdb, "Q2 cohort top 10",
+        )
+        mongo_plan = _explain_mongo(self.mdb.events, pipeline)
+
+        return pg_ms, mongo_ms, pg_plan, mongo_plan
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Query 3 — First and Last Event per User (Boundary Events)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _q3(self):
+        sql = """
+SELECT
+    user_id,
+    MIN(created_at) AS first_event,
+    MAX(created_at) AS last_event
+FROM events
+GROUP BY user_id
+ORDER BY user_id;
+"""
+        (QUERY_DIR / "q3_boundary_events.sql").write_text(sql.strip())
+
+        pg_ms, _ = _time_pg(self.pg, sql, label="Q3 boundary events")
+        pg_plan  = _explain_pg(self.pg, sql)
+
+        pipeline = [
+            {
+                "$group": {
+                    "_id": "$user_id",
+                    "first_event": {"$min": "$created_at"},
+                    "last_event":  {"$max": "$created_at"},
+                }
+            },
+            {"$sort": {"_id": 1}},
