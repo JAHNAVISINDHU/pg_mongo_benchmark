@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+benchmarks/pg_q*_explain.json
+benchmarks/mongo_q*_explain.json
